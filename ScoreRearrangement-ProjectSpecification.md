@@ -106,7 +106,7 @@ Score pairs are trained **bidirectionally** (easier→harder and harder→easier
 - Filter PDMX to piano-only scores (program=0) via PDMX.csv
 - Run `MusicXML_to_tokens()` on all MXL files
 - Save token sequences as JSON under `tokens/`
-- **Status: IN PROGRESS**
+- **Status: DONE**
 
 **[1.2] `build_pairs.py`**
 - Compute difficulty metrics (polyphony, note density, pitch width) from token files
@@ -128,13 +128,13 @@ Score pairs are trained **bidirectionally** (easier→harder and harder→easier
   ```
 
 - Save as `pairs.jsonl`
-- **Status: TODO**
+- **Status: DONE**
 
 **[1.3] `build_vocab.py`**
 - Scan all token files to collect unique tokens
 - Add special tokens: `<pad>`, `<sos>`, `<eos>`, `Lv.1`, `Lv.2`, `Lv.3`, `Lv.4`
 - Save `vocab.json` (token → index mapping)
-- **Status: TODO**
+- **Status: DONE**
 
 ---
 
