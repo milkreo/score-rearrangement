@@ -43,7 +43,7 @@ We investigated the feasibility of extending this system to cross-instrument tra
 | | Count |
 |---|---|
 | Songs with 2+ piano arrangements | 31,875 |
-| Songs with violin arrangements | 542 |
+| Songs with purely violin-only arrangements | 434 |
 | Songs with BOTH piano AND violin | 141 |
 | Total piano+violin cross pairs | 1,381 |
 
