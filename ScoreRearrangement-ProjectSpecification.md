@@ -27,7 +27,7 @@ Difficulty labels are **not pre-tagged** in PDMX and must be computed from token
 | Level 1 | Beginner | Max 1 simultaneous note per hand |
 | Level 2 | Elementary | Max 2 simultaneous notes per hand |
 | Level 3 | Intermediate | Max 3 simultaneous notes per hand |
-| Level 4 | Advanced | No restriction |
+| Level 4 | Advanced | No restriction | 
 
 Supporting metrics (also computed from tokens):
 - **Note density:** number of notes per measure
@@ -143,7 +143,7 @@ Score pairs are trained **bidirectionally** (easier→harder and harder→easier
   - Same time signature — structurally incompatible otherwise
   - Note density ratio ≤ 3× — if one arrangement has far more notes, they are likely unrelated pieces
 - Save as `pairs.jsonl`
-- **Status: DONE — rerun `python build_pairs.py` to apply compatibility filter, then retrain**
+- **Status: DONE**
 
 **[1.3] `build_vocab.py`**
 - Scan all token files to collect unique tokens
