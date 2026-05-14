@@ -6,10 +6,12 @@ CSV_PATH    = r"C:\Users\VIPLAB\Desktop\Yan\score-rearrangement\PDMX.csv"
 TOKENS_DIR  = r"C:\Users\VIPLAB\Desktop\Yan\score-rearrangement\tokens"
 OUTPUT_PATH = r"C:\Users\VIPLAB\Desktop\Yan\score-rearrangement\data\pairs.jsonl"
 
-SEG_MIN       = 4    # min bars per segment
-SEG_MAX       = 8    # max bars per segment
-SEG_STRIDE    = 2    # sliding window stride in bars
-BAR_TOLERANCE = 0.1  # max allowed bar count difference ratio between paired scores
+SEG_MIN           = 4    # min bars per segment
+SEG_MAX           = 8    # max bars per segment
+SEG_STRIDE        = 2    # sliding window stride in bars
+BAR_TOLERANCE     = 0.1  # max allowed bar count difference ratio between paired scores
+DENSITY_RATIO_MAX = 3.0  # max ratio of note densities between paired scores
+                          # (e.g. 3.0 means one can have at most 3× more notes/bar)
 
 random.seed(42)
 
@@ -101,6 +103,57 @@ def assign_level(bars):
         return 'Lv.4'
 
 
+def get_key(bars):
+    """Return the key token from the first bar that contains one, or None."""
+    for bar in bars:
+        for tok in bar:
+            if tok.startswith('key_'):
+                return tok
+    return None
+
+
+def get_time(bars):
+    """Return the time signature token from the first bar that contains one, or None."""
+    for bar in bars:
+        for tok in bar:
+            if tok.startswith('time_'):
+                return tok
+    return None
+
+
+def note_density(bars):
+    """Return average number of note tokens per bar."""
+    if not bars:
+        return 0.0
+    total = sum(t.startswith('note_') for bar in bars for t in bar)
+    return total / len(bars)
+
+
+def pairs_are_compatible(bars_a, bars_b):
+    """
+    Return True if two arrangements are likely to share the same musical content.
+    Checks:
+      1. Same key signature (strongest indicator of same melody)
+      2. Same time signature
+      3. Note density ratio within DENSITY_RATIO_MAX
+    """
+    key_a, key_b = get_key(bars_a), get_key(bars_b)
+    if key_a is not None and key_b is not None and key_a != key_b:
+        return False  # different keys → almost certainly different arrangements
+
+    time_a, time_b = get_time(bars_a), get_time(bars_b)
+    if time_a is not None and time_b is not None and time_a != time_b:
+        return False  # different time signatures → structurally incompatible
+
+    d_a, d_b = note_density(bars_a), note_density(bars_b)
+    if d_a > 0 and d_b > 0:
+        ratio = max(d_a, d_b) / min(d_a, d_b)
+        if ratio > DENSITY_RATIO_MAX:
+            return False  # one arrangement has far more notes — likely unrelated
+
+    return True
+
+
 def generate_segments(src_bars, tgt_bars, src_level, tgt_level, song, src_path, tgt_path):
     """
     Generate overlapping segment pairs using a sliding window (stride = SEG_STRIDE).
@@ -148,11 +201,12 @@ def main():
     print(f"Songs with 2+ tokenized piano arrangements: {len(multi)}")
 
     # Step 2: compute difficulty level for each arrangement, build pairs, segment
-    total_segments  = 0
-    total_pairs     = 0
-    skipped_same_lv = 0
-    skipped_bars    = 0
-    level_counts    = defaultdict(int)
+    total_segments    = 0
+    total_pairs       = 0
+    skipped_same_lv   = 0
+    skipped_bars      = 0
+    skipped_compat    = 0
+    level_counts      = defaultdict(int)
 
     with open(OUTPUT_PATH, 'w') as out:
         for i, (song, paths) in enumerate(multi.items()):
@@ -190,6 +244,11 @@ def main():
                     skipped_bars += 1
                     continue
 
+                # require same key, same time, and similar note density
+                if not pairs_are_compatible(bars_a, bars_b):
+                    skipped_compat += 1
+                    continue
+
                 # both directions: a->b and b->a
                 for sp, tp, sl, tl, sb, tb in [
                     (path_a, path_b, lv_a, lv_b, bars_a, bars_b),
@@ -206,6 +265,7 @@ def main():
     print(f"Total directional pairs:              {total_pairs}")
     print(f"Skipped (same difficulty level):      {skipped_same_lv}")
     print(f"Skipped (bar count mismatch >10%):    {skipped_bars}")
+    print(f"Skipped (key/time/density mismatch):  {skipped_compat}")
     print(f"Level distribution: {dict(sorted(level_counts.items()))}")
     print(f"Output: {OUTPUT_PATH}")
 
