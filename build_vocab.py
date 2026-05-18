@@ -3,9 +3,9 @@ import json
 import glob
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-# TODO: change these to match your own environment
-TOKENS_DIR  = r"C:\Users\VIPLAB\Desktop\Yan\score-rearrangement\tokens"
-OUTPUT_PATH = r"C:\Users\VIPLAB\Desktop\Yan\score-rearrangement\data\vocab.json"
+SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
+TOKENS_DIR  = os.path.join(SCRIPT_DIR, "tokens")
+OUTPUT_PATH = os.path.join(SCRIPT_DIR, "data", "vocab.json")
 
 # ── Special tokens ────────────────────────────────────────────────────────────
 # Order matters: padding must be index 0 so PyTorch's default ignore_index works.

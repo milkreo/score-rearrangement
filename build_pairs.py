@@ -2,9 +2,10 @@ import os, json, csv, random
 from itertools import combinations
 from collections import defaultdict
 
-CSV_PATH    = r"C:\Users\VIPLAB\Desktop\Yan\score-rearrangement\PDMX.csv"
-TOKENS_DIR  = r"C:\Users\VIPLAB\Desktop\Yan\score-rearrangement\tokens"
-OUTPUT_PATH = r"C:\Users\VIPLAB\Desktop\Yan\score-rearrangement\data\pairs.jsonl"
+SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
+CSV_PATH    = os.path.join(SCRIPT_DIR, "PDMX.csv")
+TOKENS_DIR  = os.path.join(SCRIPT_DIR, "tokens")
+OUTPUT_PATH = os.path.join(SCRIPT_DIR, "data", "pairs.jsonl")
 
 SEG_MIN           = 4    # min bars per segment
 SEG_MAX           = 8    # max bars per segment
