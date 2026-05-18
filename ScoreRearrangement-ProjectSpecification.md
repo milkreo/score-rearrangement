@@ -292,22 +292,57 @@ Score pairs are trained **bidirectionally** (easier→harder and harder→easier
 
 ---
 
-### Phase 6 — Cross-Instrument Extension (Piano ↔ Violin)
+### Phase 6 — AI Auto-Orchestration & Cross-Instrument Extension (Piano ➔ Duet)
 
-**[6.1] Expand `tokenize_all.py`**
-- Also tokenize violin scores (MIDI program = 40) from PDMX
-- Handle single-staff (R only) format for violin
-- **Status: TODO** (pending Phase 1–5 completion)
+**Motivation & data-source change vs. Section 2.1.**
+Section 2.1 concluded that cross-instrument training was infeasible because only **141 songs** in PDMX have both a piano-only arrangement and a violin-only arrangement (1,381 cross-pairs total). Phase 6 sidesteps that bottleneck by **changing the data source**: instead of pairing two separately-uploaded arrangements, we use PDMX's existing **piano + violin duet scores** (MIDI program 0 + 40 inside a single score) and **synthesize the source side ourselves** via reverse augmentation. This converts the problem from "find paired data" to "split data we already have", and unlocks a much larger pool of scores.
 
-**[6.2] Expand `build_pairs.py`**
-- Match same-song piano+violin pairs (141 songs / 1,381 pairs in PDMX — insufficient alone)
-- Supplement with external datasets (e.g., IMSLP) for more paired data
-- **Status: TODO** (requires additional data sourcing)
+**[6.1] Duet Data Processing & Reverse Augmentation (`tokenize_duet.py`)**
 
-**[6.3] Update `model.py` conditioning tokens**
-- Change conditioning from `{Dsrc, Dtgt}` to `{Isrc_Dsrc, Itgt_Dtgt}`
-- e.g., `piano_Lv3 violin_Lv1` as combined instrument+difficulty tokens
-- **Status: TODO**
+- Filter PDMX to scores whose `tracks` column contains both `0` (piano) and `40` (violin). Confirmed count: **1,629 duet scores**.
+  - Note: these are not strictly 2-track. Many are `0-40`, but others are `0-40-40`, `0-40-41-42`, etc. (extra violin doubles, viola, cello, …). Decide handling per case:
+    - Keep all piano tracks (program 0) → merge into one piano part.
+    - Keep all violin tracks (program 40) → merge into one violin melody part.
+    - Discard other programs (41/42/…) for the first iteration; revisit in a later experiment.
+- Run `MusicXML_to_tokens()` per track to isolate **[Violin Melody]** and **[Piano Accompaniment]** as separate token streams.
+- **Reverse Data Augmentation** — synthesize a **[Pseudo Piano Solo]** by merging violin melody tokens into the piano accompaniment track:
+  - Align by bar/onset, merge violin pitches into the piano right hand as additional chord notes (or as a separate voice, then flatten).
+  - **Normalization step (critical to close the train/test distribution gap):** after merging, re-run hand assignment, re-collapse simultaneous notes into chords, and strip duet-only voice markers so the pseudo solo looks like a token sequence a real piano-solo score would produce. Without this, the model overfits to the synthetic "violin stacked on piano" pattern and fails on real piano-solo inputs at inference time.
+- Output: per-score `{piano_solo_pseudo, piano_accomp, violin_melody, duet_full}` token JSONs under `tokens_duet/`.
+- **Status:** TODO (pending Phase 1–5 completion)
+
+**[6.2] Duet Pair Building (`build_pairs_duet.py`)**
+
+Build training pairs from the synthesized data. Kept as a separate script from `build_pairs.py` to avoid breaking the Phase 1–5 piano-only pipeline.
+
+- **Dataset A — Melody Extraction:** `[Pseudo Piano Solo] ➔ [Violin Melody]`
+- **Dataset B — Auto-Orchestration:** `[Pseudo Piano Solo] ➔ [Original Duet (Violin + Piano)]`
+- Reuse the 4–8-bar sliding-window segmentation from Phase 1.2 (the alignment is exact here, so no key/time/density compatibility filter is needed).
+- Output: `data/pairs_duet.jsonl` with each segment tagged by which task (A or B) it belongs to.
+- **Status:** TODO
+
+**[6.3] Vocabulary & Model Update (`build_vocab.py`, `model.py`)**
+
+- Extend `vocab.json` with:
+  - Track tokens: `<track_piano>`, `<track_violin>` (delimit per-track regions inside the target sequence for multi-track output).
+  - Task tokens: `<task_melody>`, `<task_duet>` (prepended to the source, analogous to existing `Lv.*` conditioning — lets one model handle both Dataset A and Dataset B).
+- Single multi-task seq2seq Transformer (not two separate models): same architecture as Phase 2, just a larger vocab and longer max sequence length (Dataset B targets are ~2× the length of Dataset A's).
+- Train from scratch with `train_seq2seq.py` on `pairs_duet.jsonl` (no fine-tuning from the Phase 3 checkpoint — the input distribution is too different).
+- **Status:** TODO
+
+**[6.4] Duet Inference (`infer_duet.py`)**
+
+- Input: a real piano-solo MXL + a task flag (`--task melody` or `--task duet`).
+- Pipeline mirrors Phase 4.1, with two changes:
+  - Prepend `<task_*>` token instead of (or in addition to) `Lv.*`.
+  - When detokenizing Dataset B output, split the token stream on `<track_*>` boundaries and emit a multi-staff MusicXML score (piano + violin) instead of a single piano part.
+- **Status:** TODO
+
+**[6.5] Duet Evaluation (`evaluate_duet.py`)**
+
+- **Melody extraction (Dataset A):** note-level precision / recall / F1 of extracted violin against the held-out original violin part.
+- **Auto-orchestration (Dataset B):** reuse Phase 5 distributional metrics (note density, pitch width, polyphony, JS divergence) on each track separately; also report inter-track interaction metrics (rhythmic alignment, harmonic consistency between violin & piano).
+- **Status:** TODO
 
 ---
 
