@@ -345,7 +345,8 @@ Build training pairs from the synthesized data. Kept as a separate script from `
   - Task tokens: `<task_melody>`, `<task_duet>` (prepended to the source, analogous to existing `Lv.*` conditioning — lets one model handle both Dataset A and Dataset B).
 - Single multi-task seq2seq Transformer (not two separate models): same architecture as Phase 2, just a larger vocab and longer max sequence length (Dataset B targets are ~2× the length of Dataset A's).
 - Train from scratch with `train_seq2seq.py` on `pairs_duet.jsonl` (no fine-tuning from the Phase 3 checkpoint — the input distribution is too different).
-- **Status:** TODO
+- **Actual results (run 2026-05-23):** Vocab extended 2,346 → 2,356 tokens — 4 new specials (`<task_melody>`=2346, `<task_duet>`=2347, `<track_violin>`=2348, `<track_piano>`=2349) plus 6 duet-only corpus tokens (`len_151/160`, `len_187/480`, `note_Cbb6`, `note_Fbb6`, `time_23/8`, `time_64/4`). Existing Phase 1–5 token IDs preserved by an *extend-mode* path in `build_vocab.py` (the script still does a fresh build when no `vocab.json` exists). `max_seq_len` lifted 1024 → 2048 across `model.py` (positional encoding, `build_model`, `greedy_decode` default) and `dataset_seq2seq.py` (`max_src_len` / `max_tgt_len`), sized to cover the observed max duet pair length (src 1,711 / tgt_B 1,880 tokens, both p99 < 900). `build_vocab.py` also rewired to scan both `tokens/` and `Phase06/tokens_duet/` (dict-shape JSONs handled).
+- **Status:** DONE. Code: `build_vocab.py`, `model.py`, `dataset_seq2seq.py`. Output: `data/vocab.json` (2,356 tokens).
 
 **[6.4] Duet Inference (`infer_duet.py`)**
 

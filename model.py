@@ -38,7 +38,7 @@ def _bool_to_additive(mask: torch.Tensor | None) -> torch.Tensor | None:
 class PositionalEncoding(nn.Module):
     """Sinusoidal positional encoding (Vaswani et al., 2017)."""
 
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 1024):
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 2048):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
 
@@ -82,7 +82,9 @@ class ScoreRearrangementModel(nn.Module):
     dropout : float
         Dropout probability.
     max_seq_len : int
-        Maximum sequence length for positional encoding.
+        Maximum sequence length for positional encoding. Phase 6 (duet)
+        Dataset B target sequences reach ~1880 tokens (vs. ~900 piano-only),
+        so the default was lifted from 1024 → 2048 in Phase 6.3.
     pad_idx : int
         Padding token index — embeddings at this index are zeroed out.
     """
@@ -96,7 +98,7 @@ class ScoreRearrangementModel(nn.Module):
         num_decoder_layers: int = 3,
         dim_feedforward: int = 96,
         dropout: float = 0.1,
-        max_seq_len: int = 1024,
+        max_seq_len: int = 2048,
         pad_idx: int = 0,
     ):
         super().__init__()
@@ -230,7 +232,7 @@ class ScoreRearrangementModel(nn.Module):
         src: torch.Tensor,
         sos_idx: int,
         eos_idx: int,
-        max_len: int = 1024,
+        max_len: int = 2048,
         src_key_padding_mask: torch.Tensor | None = None,
         init_token_idx: int | None = None,
         temperature: float = 1.0,
@@ -333,7 +335,7 @@ def build_model(vocab_size: int, pad_idx: int = 0) -> ScoreRearrangementModel:
         num_decoder_layers=3,
         dim_feedforward=96,
         dropout=0.1,
-        max_seq_len=1024,
+        max_seq_len=2048,
         pad_idx=pad_idx,
     )
 

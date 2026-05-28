@@ -235,8 +235,8 @@ class ScorePairDataset(Dataset):
         vocab_path: str,
         augment: bool = True,
         aug_semitones: tuple[int, ...] = (-2, -1, 0, 1, 2),
-        max_src_len: int = 1024,
-        max_tgt_len: int = 1024,
+        max_src_len: int = 2048,
+        max_tgt_len: int = 2048,
     ):
         with open(vocab_path, encoding='utf-8') as f:
             vocab_data = json.load(f)
