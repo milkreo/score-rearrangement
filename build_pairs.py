@@ -2,24 +2,70 @@ import os, json, csv, random
 from itertools import combinations
 from collections import defaultdict
 
-CSV_PATH    = r"C:\Users\VIPLAB\Desktop\Yan\score-rearrangement\PDMX.csv"
-TOKENS_DIR  = r"C:\Users\VIPLAB\Desktop\Yan\score-rearrangement\tokens"
-OUTPUT_PATH = r"C:\Users\VIPLAB\Desktop\Yan\score-rearrangement\data\pairs.jsonl"
+SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
+CSV_PATH    = os.path.join(SCRIPT_DIR, "PDMX.csv")
+TOKENS_DIR  = os.path.join(SCRIPT_DIR, "tokens")
+OUTPUT_PATH = os.path.join(SCRIPT_DIR, "data", "pairs.jsonl")
 
 SEG_MIN           = 4    # min bars per segment
 SEG_MAX           = 8    # max bars per segment
 SEG_STRIDE        = 2    # sliding window stride in bars
-BAR_TOLERANCE     = 0.1  # max allowed bar count difference ratio between paired scores
+BAR_TOLERANCE     = 0.15 # max allowed bar count difference ratio (relaxed from 0.1 to recover pickup-bar pairs)
 DENSITY_RATIO_MAX = 3.0  # max ratio of note densities between paired scores
-                          # (e.g. 3.0 means one can have at most 3× more notes/bar)
+NGRAM_OVERLAP_MIN = 0.25 # min trigram melodic overlap (filters different songs with same key/time)
 
 random.seed(42)
 
+# ---------------------------------------------------------------------------
+# Song name quality filters
+# ---------------------------------------------------------------------------
+
+_BLACKLIST_EXACT = {
+    'misc', 'untitled', 'new score', 'test', 'unknown', 'na', '',
+    'new composition', 'untitled score', 'my score',
+}
+
+_BLACKLIST_SUBSTR = [
+    'abcm2ps', 'sample tune', 'sample3', 'staff break',
+    'template', 'default',
+]
+
+# These are book/collection titles — different users upload different individual
+# pieces under the same name, so pairing them is almost always wrong.
+_COLLECTION_EXACT = {
+    'for children sz.42',
+    'for children sz. 42',
+    'mikrokosmos',
+}
+
+_COLLECTION_SUBSTR = [
+    'sz.42', 'sz. 42',
+    'mikrokosmos',
+]
+
+
+def is_bad_song_name(name: str) -> bool:
+    """Return True if the song name is a garbage label or known collection title."""
+    n = name.strip().lower()
+    if n in _BLACKLIST_EXACT:
+        return True
+    if any(s in n for s in _BLACKLIST_SUBSTR):
+        return True
+    if n in _COLLECTION_EXACT:
+        return True
+    if any(s in n for s in _COLLECTION_SUBSTR):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Token helpers
+# ---------------------------------------------------------------------------
 
 def token_path_from_mxl(mxl_rel):
     """Convert CSV mxl path (./mxl/1/11/Qm....mxl) to tokens/ path."""
-    rel = mxl_rel.lstrip('./')              # mxl/1/11/Qm....mxl
-    rel = rel.replace('mxl/', '', 1)        # 1/11/Qm....mxl
+    rel = mxl_rel.lstrip('./')
+    rel = rel.replace('mxl/', '', 1)
     rel = rel.replace('.mxl', '.json').replace('.xml', '.json')
     return os.path.join(TOKENS_DIR, rel)
 
@@ -129,27 +175,62 @@ def note_density(bars):
     return total / len(bars)
 
 
+def _pitch_ngrams(bars, n=3, n_bars=4):
+    """
+    Return a set of pitch-letter n-grams from the first n_bars.
+    Uses the right-hand melody line (or all notes if R marker absent).
+    Order-sensitive: 'C-E-G' and 'G-E-C' are different n-grams.
+    """
+    notes = []
+    for bar in bars[:n_bars]:
+        hand = get_hand_tokens(bar, 'R') or bar
+        notes += [t[5] for t in hand if t.startswith('note_')]
+    if len(notes) < n:
+        return set()
+    return set(zip(*[notes[i:] for i in range(n)]))
+
+
+def melodic_ngram_overlap(bars_a, bars_b, n=3, n_bars=4) -> float:
+    """
+    Jaccard similarity of pitch-letter trigram sets over the first n_bars.
+    Returns a value in [0, 1]; higher means more melodic similarity.
+    More reliable than letter-set Jaccard because it captures note ORDER,
+    preventing two different songs in the same key from scoring 1.0.
+    """
+    a = _pitch_ngrams(bars_a, n, n_bars)
+    b = _pitch_ngrams(bars_b, n, n_bars)
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
 def pairs_are_compatible(bars_a, bars_b):
     """
     Return True if two arrangements are likely to share the same musical content.
-    Checks:
-      1. Same key signature (strongest indicator of same melody)
+    Checks (in order of cost, cheapest first):
+      1. Same key signature
       2. Same time signature
       3. Note density ratio within DENSITY_RATIO_MAX
+      4. Melodic trigram overlap >= NGRAM_OVERLAP_MIN
     """
     key_a, key_b = get_key(bars_a), get_key(bars_b)
     if key_a is not None and key_b is not None and key_a != key_b:
-        return False  # different keys → almost certainly different arrangements
+        return False
 
     time_a, time_b = get_time(bars_a), get_time(bars_b)
     if time_a is not None and time_b is not None and time_a != time_b:
-        return False  # different time signatures → structurally incompatible
+        return False
 
     d_a, d_b = note_density(bars_a), note_density(bars_b)
     if d_a > 0 and d_b > 0:
         ratio = max(d_a, d_b) / min(d_a, d_b)
         if ratio > DENSITY_RATIO_MAX:
-            return False  # one arrangement has far more notes — likely unrelated
+            return False
+
+    if melodic_ngram_overlap(bars_a, bars_b) < NGRAM_OVERLAP_MIN:
+        return False
 
     return True
 
@@ -181,15 +262,16 @@ def generate_segments(src_bars, tgt_bars, src_level, tgt_level, song, src_path, 
 def main():
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
 
-    # Step 1: collect tokenized piano scores grouped by song name
     print("Loading CSV and matching to token files...")
-    song_to_scores = defaultdict(list)  # song_name -> [token_path, ...]
+    song_to_scores = defaultdict(list)
 
-    with open(CSV_PATH, encoding='utf-8') as f:
+    with open(CSV_PATH, encoding='utf-8', errors='replace') as f:
         for row in csv.DictReader(f):
             tracks = row['tracks'].strip()
             song   = row['song_name'].strip()
             if not song or song == 'NA':
+                continue
+            if is_bad_song_name(song):
                 continue
             if not all(t == '0' for t in tracks.split('-')):
                 continue
@@ -200,7 +282,6 @@ def main():
     multi = {s: v for s, v in song_to_scores.items() if len(v) >= 2}
     print(f"Songs with 2+ tokenized piano arrangements: {len(multi)}")
 
-    # Step 2: compute difficulty level for each arrangement, build pairs, segment
     total_segments    = 0
     total_pairs       = 0
     skipped_same_lv   = 0
@@ -213,7 +294,6 @@ def main():
             if i % 1000 == 0:
                 print(f"  [{i}/{len(multi)}]  segments so far: {total_segments}")
 
-            # load tokens and assign difficulty level for each arrangement
             scored = []
             for path in paths:
                 try:
@@ -221,7 +301,7 @@ def main():
                         tokens = json.load(f)
                     bars  = split_into_bars(tokens)
                     if len(bars) < SEG_MIN:
-                        continue  # too short to segment
+                        continue
                     level = assign_level(bars)
                     scored.append((path, level, bars))
                     level_counts[level] += 1
@@ -231,25 +311,21 @@ def main():
             if len(scored) < 2:
                 continue
 
-            # generate all nC2 pairs, trained bidirectionally (paper Section 3.1.1)
             for (path_a, lv_a, bars_a), (path_b, lv_b, bars_b) in combinations(scored, 2):
 
                 if lv_a == lv_b:
                     skipped_same_lv += 1
-                    continue  # no difficulty transformation — skip
+                    continue
 
-                # require bar counts to be within tolerance for clean alignment
                 na, nb = len(bars_a), len(bars_b)
                 if abs(na - nb) / max(na, nb) > BAR_TOLERANCE:
                     skipped_bars += 1
                     continue
 
-                # require same key, same time, and similar note density
                 if not pairs_are_compatible(bars_a, bars_b):
                     skipped_compat += 1
                     continue
 
-                # both directions: a->b and b->a
                 for sp, tp, sl, tl, sb, tb in [
                     (path_a, path_b, lv_a, lv_b, bars_a, bars_b),
                     (path_b, path_a, lv_b, lv_a, bars_b, bars_a),
@@ -261,11 +337,11 @@ def main():
                     total_pairs    += 1
 
     print(f"\nDone.")
-    print(f"Total training segments:              {total_segments}")
-    print(f"Total directional pairs:              {total_pairs}")
-    print(f"Skipped (same difficulty level):      {skipped_same_lv}")
-    print(f"Skipped (bar count mismatch >10%):    {skipped_bars}")
-    print(f"Skipped (key/time/density mismatch):  {skipped_compat}")
+    print(f"Total training segments:                    {total_segments}")
+    print(f"Total directional pairs:                    {total_pairs}")
+    print(f"Skipped (same difficulty level):            {skipped_same_lv}")
+    print(f"Skipped (bar count mismatch >{BAR_TOLERANCE*100:.0f}%): {skipped_bars}")
+    print(f"Skipped (key/time/density/ngram mismatch):  {skipped_compat}")
     print(f"Level distribution: {dict(sorted(level_counts.items()))}")
     print(f"Output: {OUTPUT_PATH}")
 

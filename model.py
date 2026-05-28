@@ -106,6 +106,7 @@ class ScoreRearrangementModel(nn.Module):
 
         self.d_model = d_model
         self.pad_idx = pad_idx
+        self.max_seq_len = max_seq_len  # hard limit imposed by PositionalEncoding
 
         # Shared embedding used for both encoder input and decoder input
         self.embedding = nn.Embedding(vocab_size, d_model, padding_idx=pad_idx)
@@ -276,6 +277,10 @@ class ScoreRearrangementModel(nn.Module):
         outputs = [[] for _ in range(batch_size)]
 
         for _ in range(max_len):
+            # Stop before tgt grows past the positional encoding limit
+            if tgt.size(1) >= self.max_seq_len:
+                break
+
             logits = self.decode_step(tgt, memory, memory_key_padding_mask=src_key_padding_mask)
             # (batch, vocab_size)
 

@@ -3,9 +3,10 @@ from music21 import musicxml
 warnings.filterwarnings("ignore", category=musicxml.xmlToM21.MusicXMLWarning)
 from score_to_tokens import MusicXML_to_tokens
 
-csv_path    = "/Users/yan/Documents/GitHub/score-rearrangement/PDMX.csv"
-mxl_root    = "/Users/yan/Documents/GitHub/score-rearrangement/mxl"
-output_dir  = "/Users/yan/Documents/GitHub/score-rearrangement/tokens"
+SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
+csv_path    = os.path.join(SCRIPT_DIR, "PDMX.csv")
+mxl_root    = os.path.join(SCRIPT_DIR, "mxl")
+output_dir  = os.path.join(SCRIPT_DIR, "tokens")
 os.makedirs(output_dir, exist_ok=True)
 
 # collect piano-only mxl paths from metadata
