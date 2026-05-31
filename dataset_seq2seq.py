@@ -4,10 +4,22 @@ dataset_seq2seq.py — PyTorch Dataset for Piano Score Rearrangement
 Loads pairs.jsonl, encodes tokens to integer IDs using vocab.json,
 and applies optional pitch transposition augmentation (±2 semitones).
 
-Sequence layout (matching paper Fig. 2b):
-  Encoder input : [Dsrc, Dtgt, bar, ...tokens..., <eos>]
-  Decoder input : [<sos>, Dtgt, bar, ...tokens...]        ← teacher-forced
-  Decoder target: [Dtgt, bar, ...tokens..., <eos>]        ← loss target
+Two pair-file formats are auto-detected (Phase 6.4 addition):
+
+  • Piano-only (`data/pairs.jsonl`, Phase 1.2)
+      {src_tokens, tgt_tokens, src_level, tgt_level, song, ...}
+      Conditioning: Lv.* tokens (paper Fig. 2b).
+      Encoder: [Lv.src, Lv.tgt, ...src_tokens..., <eos>]
+      Decoder: [<sos>, Lv.tgt, ...tgt_tokens..., <eos>]
+
+  • Duet (`Phase06/pairs_duet.jsonl`, Phase 6.2)
+      {src, tgt, task, song, ...}  where task ∈ {'A','B'}
+      Conditioning: <task_melody> for A, <task_duet> for B.
+      Encoder: [<task_*>, ...src..., <eos>]
+      Decoder: [<sos>, <task_*>, ...tgt..., <eos>]
+
+Format is detected once at dataset construction by inspecting the first record.
+Mixed-format files are not supported.
 
 Usage:
     dataset = ScorePairDataset('data/pairs.jsonl', 'data/vocab.json', augment=True)
@@ -229,6 +241,9 @@ class ScorePairDataset(Dataset):
     max_tgt_len   : hard truncation for full decoder sequence (before split)
     """
 
+    # Task code -> conditioning token used in both src and tgt prefixes (Phase 6.4)
+    _TASK_TO_TOKEN = {'A': '<task_melody>', 'B': '<task_duet>'}
+
     def __init__(
         self,
         pairs_path: str,
@@ -255,6 +270,22 @@ class ScorePairDataset(Dataset):
         with open(pairs_path, encoding='utf-8') as f:
             self.pairs = [json.loads(line) for line in f if line.strip()]
 
+        # Detect file format from the first record (piano-only vs duet).
+        self.format = self._detect_format(self.pairs[0]) if self.pairs else 'piano'
+
+    @staticmethod
+    def _detect_format(record: dict) -> str:
+        """'piano' if record has src_tokens/tgt_tokens; 'duet' if it has src/tgt/task."""
+        if 'src_tokens' in record and 'tgt_tokens' in record:
+            return 'piano'
+        if 'src' in record and 'tgt' in record and 'task' in record:
+            return 'duet'
+        raise ValueError(
+            f"Unrecognized pair record format. Keys: {sorted(record)}. "
+            "Expected piano-only (src_tokens/tgt_tokens/src_level/tgt_level) "
+            "or duet (src/tgt/task)."
+        )
+
     def _encode(self, tokens: list[str]) -> list[int]:
         """Convert token strings to IDs, using <unk> for out-of-vocab tokens."""
         return [self.token_to_id.get(t, self.unk_id) for t in tokens]
@@ -264,10 +295,19 @@ class ScorePairDataset(Dataset):
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         pair = self.pairs[idx]
-        src_tokens: list[str] = pair['src_tokens']
-        tgt_tokens: list[str] = pair['tgt_tokens']
-        src_level:  str       = pair['src_level']   # e.g. 'Lv.2'
-        tgt_level:  str       = pair['tgt_level']   # e.g. 'Lv.1'
+
+        if self.format == 'piano':
+            src_tokens: list[str] = pair['src_tokens']
+            tgt_tokens: list[str] = pair['tgt_tokens']
+            src_cond:   str       = pair['src_level']   # e.g. 'Lv.2'
+            tgt_cond:   str       = pair['tgt_level']   # e.g. 'Lv.1'
+        else:  # 'duet'
+            src_tokens = pair['src']
+            tgt_tokens = pair['tgt']
+            # Duet has a single task conditioning token used on both sides.
+            task_tok   = self._TASK_TO_TOKEN[pair['task']]
+            src_cond   = task_tok
+            tgt_cond   = task_tok
 
         # Pitch transposition augmentation
         if self.augment:
@@ -276,11 +316,11 @@ class ScorePairDataset(Dataset):
                 src_tokens = transpose_tokens(src_tokens, shift)
                 tgt_tokens = transpose_tokens(tgt_tokens, shift)
 
-        # Build sequences with difficulty conditioning tokens (paper Fig. 2b):
-        #   src: [Dsrc, Dtgt, <content>, <eos>]
-        #   tgt: [<sos>, Dtgt, <content>, <eos>]
-        src_ids = self._encode([src_level, tgt_level] + src_tokens + ['<eos>'])
-        tgt_ids = self._encode(['<sos>', tgt_level]   + tgt_tokens + ['<eos>'])
+        # Build sequences (paper Fig. 2b layout, reused for duet with <task_*>):
+        #   src: [Dsrc/Task, Dtgt/Task, <content>, <eos>]
+        #   tgt: [<sos>, Dtgt/Task, <content>, <eos>]
+        src_ids = self._encode([src_cond, tgt_cond] + src_tokens + ['<eos>'])
+        tgt_ids = self._encode(['<sos>', tgt_cond]   + tgt_tokens + ['<eos>'])
 
         # Truncate (rare, only for very long segments)
         src_ids = src_ids[:self.max_src_len]

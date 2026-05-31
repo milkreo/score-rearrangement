@@ -297,6 +297,17 @@ Score pairs are trained **bidirectionally** (easier→harder and harder→easier
 **Motivation & data-source change vs. Section 2.1.**
 Section 2.1 concluded that cross-instrument training was infeasible because only **141 songs** in PDMX have both a piano-only arrangement and a violin-only arrangement (1,381 cross-pairs total). Phase 6 sidesteps that bottleneck by **changing the data source**: instead of pairing two separately-uploaded arrangements, we use PDMX's existing **piano + violin duet scores** (MIDI program 0 + 40 inside a single score) and **synthesize the source side ourselves** via reverse augmentation. This converts the problem from "find paired data" to "split data we already have", and unlocks a much larger pool of scores.
 
+**Phase 6 ↔ Phase 1–5 shared-file impact (added 2026-05-28).**
+Phase 6 modifies four files that Phase 1–5 also depends on: `model.py`, `data/vocab.json`, `build_vocab.py`, and `dataset_seq2seq.py`. All changes are designed to be **forward-compatible for new Phase 1–5 training runs**, but the existing Phase 3 Round-1 checkpoint (`data/checkpoints/best.pt`) is **no longer directly loadable** because the vocab size (2,346 → 2,356) and positional-encoding length (1,024 → 2,048) both grew.
+
+This is acceptable because:
+1. The Round-1 checkpoint was trained on the noisy pre-compatibility-filter pairs and is slated for re-training anyway (see §3 "Round 2 plan").
+2. When Phase 1–5 Round 2 retrains from the current `model.py` + `vocab.json`, piano-only segments (< 1,000 tokens) fit comfortably in the larger buffers — extra PE memory is ~192 KB, parameter count unchanged.
+3. The 10 duet-specific embedding rows that a piano-only run never sees simply stay at their initial values — no harm done.
+4. The four new specials (`<task_melody>`, `<task_duet>`, `<track_violin>`, `<track_piano>`) appended at IDs 2,346–2,349 are unused in piano-only training. Existing token→id mappings for IDs 0–2,345 are preserved bit-for-bit (extend-mode in `build_vocab.py`).
+
+**Operational note for teammates:** Round 2 training must pull the Phase 6 branch (or merge it to main) so that `model.py` and `vocab.json` are in sync with the saved checkpoint. There is no way to load a 1,024-PE / 2,346-vocab checkpoint into a 2,048-PE / 2,356-vocab model without either reverting `model.py` or doing weight surgery (deferred — see §6.4 "Approach choice").
+
 **[6.1] Duet Data Processing & Reverse Augmentation (`tokenize_duet.py`)**
 
 - Filter PDMX to scores whose `tracks` column contains both `0` (piano) and `40` (violin). Verified against `PDMX.csv` (254,077 rows total): **1,890 scores match**.
@@ -346,15 +357,61 @@ Build training pairs from the synthesized data. Kept as a separate script from `
 - Single multi-task seq2seq Transformer (not two separate models): same architecture as Phase 2, just a larger vocab and longer max sequence length (Dataset B targets are ~2× the length of Dataset A's).
 - Train from scratch with `train_seq2seq.py` on `pairs_duet.jsonl` (no fine-tuning from the Phase 3 checkpoint — the input distribution is too different).
 - **Actual results (run 2026-05-23):** Vocab extended 2,346 → 2,356 tokens — 4 new specials (`<task_melody>`=2346, `<task_duet>`=2347, `<track_violin>`=2348, `<track_piano>`=2349) plus 6 duet-only corpus tokens (`len_151/160`, `len_187/480`, `note_Cbb6`, `note_Fbb6`, `time_23/8`, `time_64/4`). Existing Phase 1–5 token IDs preserved by an *extend-mode* path in `build_vocab.py` (the script still does a fresh build when no `vocab.json` exists). `max_seq_len` lifted 1024 → 2048 across `model.py` (positional encoding, `build_model`, `greedy_decode` default) and `dataset_seq2seq.py` (`max_src_len` / `max_tgt_len`), sized to cover the observed max duet pair length (src 1,711 / tgt_B 1,880 tokens, both p99 < 900). `build_vocab.py` also rewired to scan both `tokens/` and `Phase06/tokens_duet/` (dict-shape JSONs handled).
+- **Compatibility note (added during 6.4 planning, 2026-05-28):** `data/pairs.jsonl` (piano-only) and `Phase06/pairs_duet.jsonl` use different field names and different conditioning tokens:
+
+  | | piano-only (`pairs.jsonl`) | duet (`pairs_duet.jsonl`) |
+  |---|---|---|
+  | source tokens | `src_tokens` | `src` |
+  | target tokens | `tgt_tokens` | `tgt` |
+  | conditioning  | `src_level` / `tgt_level` → `Lv.*` | `task` (`A`/`B`) → `<task_melody>`/`<task_duet>` |
+
+  To run `train_seq2seq.py --pairs Phase06/pairs_duet.jsonl` without forking the trainer, `ScorePairDataset` in `dataset_seq2seq.py` is extended to **auto-detect** the format on first record: presence of `src_tokens` → piano-only path with `Lv.*` conditioning; presence of `task` → duet path with `<task_*>` conditioning. Existing piano-only training is unaffected.
 - **Status:** DONE. Code: `build_vocab.py`, `model.py`, `dataset_seq2seq.py`. Output: `data/vocab.json` (2,356 tokens).
 
-**[6.4] Duet Inference (`infer_duet.py`)**
+**[6.4] Duet Inference (`Phase06/infer_duet.py`)**
 
-- Input: a real piano-solo MXL + a task flag (`--task melody` or `--task duet`).
-- Pipeline mirrors Phase 4.1, with two changes:
-  - Prepend `<task_*>` token instead of (or in addition to) `Lv.*`.
-  - When detokenizing Dataset B output, split the token stream on `<track_*>` boundaries and emit a multi-staff MusicXML score (piano + violin) instead of a single piano part.
-- **Status:** TODO
+Pipeline mirrors Phase 4.1 (`infer.py`) with three changes for duet support:
+
+1. **Conditioning token swap.** Prepend `<task_melody>` (Dataset A) or `<task_duet>` (Dataset B) to the encoder source instead of `Lv.src Lv.tgt`. The target task token is also forced into the decoder prefix via `init_token_idx` in `greedy_decode`, the same mechanism `infer.py` uses for `Lv.*`.
+2. **Multi-staff output for `--task duet`.** After the model emits a single flat token stream containing both `<track_violin> ...` and `<track_piano> ...` regions, split at the boundaries and build two separate `music21.Part` objects (violin = program 40, piano = program 0), then combine into one multi-staff `music21.Score`. `--task melody` produces a single-part violin MXL.
+3. **No `Lv.*` conditioning.** Phase 6.4 conditions only on task (melody vs duet); the model was not trained on difficulty during Phase 6, so passing `Lv.*` would be out-of-distribution.
+
+**Pre-requisite — training.** Path **A (from-scratch)** chosen over Path B (weight surgery from Phase 3 `best.pt`), consistent with §6.3. Reasons:
+- The Phase 3 checkpoint was trained with `Lv.*` conditioning and piano-solo → piano-solo outputs. Phase 6 conditioning (`<task_*>`) and outputs (multi-track via `<track_*>`) are sufficiently different that warm-starting offers little upside.
+- The Phase 3 `best.pt` is a Round-1 model on noisy pairs and is itself slated for re-training.
+- 0.3 M-param model on 146,732 segments trains fast.
+
+Training command:
+```bash
+python train_seq2seq.py \
+    --pairs Phase06/pairs_duet.jsonl \
+    --out_dir data/checkpoints_duet \
+    --epochs 100 --lr 1e-3
+```
+
+Inference CLI (planned):
+```bash
+python Phase06/infer_duet.py \
+    --input <piano.mxl> --output <out.mxl> \
+    --task {melody|duet} \
+    --checkpoint data/checkpoints_duet/best.pt \
+    --seg_len 8 --temperature 1.2 --top_k 10
+```
+
+**Path B (weight surgery) — deferred as Plan B.** If Path A's val loss plateaus poorly, the fallback is to expand the Phase 3 `best.pt` tensors (`embedding.weight` 2346→2356, `out_proj.weight` 2346→2356, `out_proj.bias` 2346→2356) by copying old rows and re-initialising the 10 new rows with the same init scheme as `_init_weights`; `pos_encoding.pe` does not need surgical preservation because sinusoidal PE is deterministic per position, so loading with `strict=False` and letting the new model rebuild its 2,048-length PE is correct. Fine-tuning then proceeds via `--resume`.
+
+**Validator fix carried in `Phase06/infer_duet.py` (not propagated to `infer.py`).** The chord-aware note-group validator (`_note_group_lengths_ok`) replaces the version `infer.py` uses (`_bar_is_valid`), which incorrectly rejects bars with chord notation (e.g. `note_A note_C note_E len_2` — three notes sharing one length). The piano-only inferencer still works because it falls back to source-pass-through on validation failure, which masks the bug; we keep the existing behaviour there to avoid touching Phase 1–5 code, but the duet inferencer uses the corrected version. A follow-up to apply the same fix to `infer.py` is recommended once the duet pipeline is validated.
+
+**Single-staff piano handling.** Some PDMX duet scores have a piano part tokenized without R/L markers (silent/tacet sections, or single-staff piano notation). `infer_duet.py`'s `piano_tokens_to_score` detects this case and uses `tokens_to_PartStaff` directly instead of `tokens_to_score` (which assumes R+L). The output `Score` then contains a single piano Part rather than two PartStaffs in a brace StaffGroup.
+
+**Smoke-test results (2026-05-28).** Without a trained checkpoint:
+- All four helpers (`encode_segment`, `split_duet_output`, `violin_segment_valid`, `piano_segment_valid`) verified on the first 3,000 Dataset B targets and 1,000 Dataset A targets from `pairs_duet.jsonl` — 100 % pass rate after the chord-aware fix and the single-staff piano relaxation.
+- `build_melody_score` and `build_duet_score` produce 1- and 3-part `music21.Score` objects respectively (Violin / Violin+PianoR+PianoL), and write to MusicXML without errors.
+- End-to-end pipeline (encode → `greedy_decode` → split → detokenise) runs without crashing on a random-init model; the random output legitimately fails the `<track_*>` split as expected, exercising the "skip malformed segment" fallback.
+
+- **Status:** SCRIPT COMPLETE; training + real inference deferred pending compute decision (see "Open decision: training compute" below). Code: `Phase06/infer_duet.py`.
+
+**Open decision: training compute.** Current dev machine has no CUDA GPU. With 146,732 duet pairs (7.6 × Phase 1–5's 19,172), CPU training is impractical (estimated days per epoch). User to choose between: (a) own GPU machine, (b) Colab/cloud, or (c) CPU proof-of-concept on a 10–20 k subset. Until then `data/checkpoints_duet/best.pt` does not exist and `infer_duet.py` cannot be exercised end-to-end on a real piano-solo MXL.
 
 **[6.5] Duet Evaluation (`evaluate_duet.py`)**
 
@@ -371,21 +428,35 @@ score-rearrangement/
     mxl/                         raw MusicXML files (PDMX)
     tokens/                      tokenized JSON files (output of 1.1)
     data/
-        pairs.jsonl              training pairs (output of 1.2)
+        pairs.jsonl              piano-only training pairs (output of 1.2)
         score_list.csv           per-score difficulty table (output of list_scores.py)
-        vocab.json               vocabulary (output of 1.3)
-        checkpoints/             saved model weights
-            best.pt              best checkpoint by val loss
+        vocab.json               vocabulary (output of 1.3, extended in 6.3)
+        checkpoints/             Phase 3 piano-only model weights
+            best.pt              best checkpoint by val loss (Round 1, noisy)
             epoch_NNNN.pt        periodic snapshots
             train_log.csv        epoch-by-epoch training log
+        checkpoints_duet/        Phase 6 duet model weights (created in 6.4)
+            best.pt              best checkpoint by val loss
+            train_log.csv        epoch-by-epoch training log
+    Phase06/
+        mxl_duet/                raw MXL filtered to scores with piano+violin tracks
+        tokens_duet/             per-track tokenized duets (output of 6.1)
+        extract_duet_mxl.py      PDMX filter for piano+violin scores [Phase 6.1]
+        tokenize_duet.py         per-track ST+ tokenization [Phase 6.1]
+        build_pairs_duet.py      pseudo-solo synthesis + pair building [Phase 6.2]
+        pairs_duet.jsonl         146,732 duet training pairs (Dataset A + B)
+        infer_duet.py            duet inference script [Phase 6.4]
+        evaluate_duet.py         duet evaluation metrics [Phase 6.5]
+        validate_duet_data.py    sanity checks for tokens/pairs
+        explore_duet_tokenize.py exploratory script (kept for reference)
     score_to_tokens.py           MXL → ST+ tokens
     tokens_to_score.py           ST+ tokens → MXL
     tokenize_all.py              batch tokenization [Phase 1.1]
     build_pairs.py               pair generation + difficulty labeling [Phase 1.2]
-    build_vocab.py               vocabulary builder [Phase 1.3]
-    model.py                     seq2seq Transformer [Phase 2.1]
-    dataset_seq2seq.py           PyTorch Dataset [Phase 2.2]
-    train_seq2seq.py             training script [Phase 3.1]
+    build_vocab.py               vocabulary builder [Phase 1.3 + 6.3 extend mode]
+    model.py                     seq2seq Transformer [Phase 2.1, max_seq_len=2048 since 6.3]
+    dataset_seq2seq.py           PyTorch Dataset [Phase 2.2 + 6.4 dual-format support]
+    train_seq2seq.py             training script [Phase 3.1, reused for 6.4]
     infer.py                     inference script [Phase 4.1]
     evaluate.py                  evaluation metrics [Phase 5.1]
     list_scores.py               generates score_list.csv for test score selection
