@@ -363,12 +363,91 @@ Build training pairs from the synthesized data. Kept as a separate script from `
 
 ---
 
+### Phase 7 — Violin Difficulty Rearrangement (Fine-tuning)
+
+**Motivation.** The piano model (Phase 1–5) learns to rearrange a piano score at the notation level. Phase 7 fine-tunes that model on violin-only scores so it can perform the same difficulty transformation on violin notation, without training from scratch.
+
+---
+
+**[7.1] Violin Tokenization (`Phase07/tokenize_violin.py`)**
+
+- Filter PDMX to violin-only scores (MIDI program = 40) via `PDMX.csv`.
+- Run `ViolinXML_to_tokens()` (defined in `score_to_tokens.py`) on all MXL files — takes `parts[0]`, supports 1 or 2 part scores.
+- Save token sequences as plain lists under `violin_tokens/`, same format as `tokens/`.
+- **Status: DONE**
+
+---
+
+**[7.2] Violin Pair Building (`Phase07/build_pairs_violin.py`)**
+
+PDMX contains only 1,433 violin-only scores (vs. 205,789 piano), and unlike the piano subset, very few share the same song title across multiple arrangements. This makes parallel pairing infeasible.
+
+**Non-parallel pairing strategy:** Group scores by difficulty level (Lv.1–Lv.4), then randomly pair scores across different levels within each group. A `note_density_ratio` filter (≤ 3×) is applied to reject structurally incompatible pairs.
+
+Known limitation: because the source and target in each pair are **different pieces**, the model learns to generate violin music at a target difficulty level rather than to transform a specific input piece. The output will be musically coherent but will not preserve the melody or structure of the input.
+
+- Output: `Phase07/pairs_violin.jsonl`
+- **Status: DONE**
+
+---
+
+**[7.3] Vocabulary Extension (`Phase07/build_vocab_violin.py`)**
+
+- Start from the existing piano `vocab.json`.
+- Add two instrument conditioning tokens: `piano` (id=8), `violin` (id=9).
+- These tokens are prepended to the sequence alongside the difficulty tokens, allowing the model to distinguish instrument context during fine-tuning.
+- Output: `Phase07/vocab_violin.json`
+- **Status: DONE**
+
+---
+
+**[7.4] Model (`Phase07/model_violin.py`)**
+
+- Same encoder-decoder Transformer architecture as `model.py`.
+- Added `resize_embedding()` — extends the embedding layer when the violin vocabulary is larger than the pre-trained piano vocabulary, initialising new token embeddings randomly while keeping existing piano weights intact.
+- Added `init_tokens` parameter to `greedy_decode()` — supports multi-token forced prefix (instrument token + difficulty token) at the start of decoding.
+- **Status: DONE**
+
+---
+
+**[7.5] Fine-tuning (`Phase07/finetune_violin.py`)**
+
+- Loads the best piano checkpoint (`data/checkpoints/best.pt`) and fine-tunes on `Phase07/pairs_violin.jsonl`.
+- Encoder layers 0–1 are frozen, allowing the encoder to retain its piano-learned representations while the decoder adapts to violin notation.
+- `make_violin_splits()` — splits data at the segment level (no `song` column in violin pairs, unlike piano `pairs.jsonl`).
+- Conditioning prefix: `{I_src, D_src, I_tgt, D_tgt}` — instrument token followed by difficulty token for both source and target sides.
+- Training settings: `lr=1e-4`, fine-tune from the updated piano checkpoint (rerun after Phase 3 Round 2 completes).
+- **Round 1 results:** 100 epochs, val_loss = 1.6883. train_loss ≈ 2.88 (higher than val due to pitch augmentation, expected). Val loss still slowly decreasing at epoch 100.
+- **Status: Round 1 DONE. Pending rerun after piano model (Phase 3 Round 2) is retrained.**
+
+---
+
+**[7.6] Inference (`Phase07/infer_violin.py`)**
+
+- Input: a violin-only MXL + target difficulty level.
+- Conditioning prefix `{I_src, D_src, I_tgt, D_tgt}` is prepended to each segment.
+- Detokenization calls `tokens_to_PartStaff()` directly, bypassing `split_header_R_L()` (which assumes piano left/right hand structure and fails on single-staff violin scores).
+- **Status: DONE**
+
+---
+
+**[7.7] Evaluation (`Phase07/evaluate_violin.py`)**
+
+- Use the 141 songs in PDMX that have both piano and violin arrangements as a held-out evaluation set.
+- Extract the violin part from each score and run inference to generate difficulty-transformed versions.
+- Compute note density, pitch width, and polyphony distributions on the generated output.
+- Report Jensen-Shannon divergence between generated and reference difficulty-level distributions.
+- **Status: TODO**
+
+---
+
 ## 6. File Structure
 
 ```
 score-rearrangement/
     mxl/                         raw MusicXML files (PDMX)
     tokens/                      tokenized JSON files (output of 1.1)
+    violin_tokens/               tokenized violin JSON files (output of 7.1)
     data/
         pairs.jsonl              training pairs (output of 1.2)
         score_list.csv           per-score difficulty table (output of list_scores.py)
@@ -377,6 +456,9 @@ score-rearrangement/
             best.pt              best checkpoint by val loss
             epoch_NNNN.pt        periodic snapshots
             train_log.csv        epoch-by-epoch training log
+            violin/
+                best.pt          best violin checkpoint by val loss
+                train_log.csv    violin training log
     score_to_tokens.py           MXL → ST+ tokens
     tokens_to_score.py           ST+ tokens → MXL
     tokenize_all.py              batch tokenization [Phase 1.1]
@@ -390,6 +472,22 @@ score-rearrangement/
     list_scores.py               generates score_list.csv for test score selection
     PDMX.csv                     PDMX metadata
     ScoreRearrangement-ProjectSpecification.md
+    Phase06/
+        extract_duet_mxl.py      selective MXL extraction [Phase 6.1]
+        tokenize_duet.py         per-track tokenization [Phase 6.1]
+        build_pairs_duet.py      duet pair generation [Phase 6.2]
+        tokens_duet/             per-score {piano, violin} token JSONs
+        pairs_duet.jsonl         duet training pairs (output of 6.2)
+    Phase07/
+        tokenize_violin.py       batch tokenization for violin [Phase 7.1]
+        build_pairs_violin.py    non-parallel pair generation [Phase 7.2]
+        build_vocab_violin.py    vocabulary extension [Phase 7.3]
+        vocab_violin.json        extended vocabulary (output of 7.3)
+        pairs_violin.jsonl       violin training pairs (output of 7.2)
+        model_violin.py          model with resize_embedding [Phase 7.4]
+        finetune_violin.py       fine-tuning script [Phase 7.5]
+        infer_violin.py          inference script [Phase 7.6]
+        evaluate_violin.py       evaluation metrics [Phase 7.7]
 ```
 
 ---
