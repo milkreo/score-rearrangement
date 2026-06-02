@@ -181,6 +181,24 @@ def piano_segment_valid(tokens):
     return all(_note_group_lengths_ok(b) for b in bars)
 
 
+def append_segment(stream_tokens, seg):
+    """Concatenate a decoded segment onto the running output stream.
+
+    Each decoded segment already begins with its own `bar` marker (the
+    training targets are built with `bars_to_tokens`, which prepends one),
+    so segments are joined by direct concatenation. Inserting an extra
+    separating `bar` here would create an empty bar at every segment
+    boundary — harmless for the violin (`tokens_to_PartStaff` tolerates it)
+    but fatal for the piano, where `tokens_to_score`/`to_ST` split on `bar`
+    and then call `.index('R')` on each bar, raising "'R' is not in list"
+    on the empty one. If a malformed segment lacks a leading `bar`, add one
+    so it stays a distinct bar instead of merging into the previous one.
+    """
+    if seg and seg[0] != 'bar':
+        stream_tokens.append('bar')
+    stream_tokens.extend(seg)
+
+
 def split_duet_output(tokens):
     """
     Split a Dataset B decoded segment into (violin_tokens, piano_tokens).
@@ -403,7 +421,7 @@ def main():
 
         if args.task == 'melody':
             if violin_segment_valid(decoded):
-                violin_stream.extend(['bar'] + decoded if violin_stream else decoded)
+                append_segment(violin_stream, decoded)
             else:
                 n_skipped += 1
         else:  # duet
@@ -411,8 +429,8 @@ def main():
             if v is None or p is None:
                 n_skipped += 1
             elif violin_segment_valid(v) and piano_segment_valid(p):
-                violin_stream.extend(['bar'] + v if violin_stream else v)
-                piano_stream.extend(['bar'] + p if piano_stream else p)
+                append_segment(violin_stream, v)
+                append_segment(piano_stream, p)
             else:
                 n_skipped += 1
 

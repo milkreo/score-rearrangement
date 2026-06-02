@@ -193,40 +193,75 @@ def split_piano_bar(bar_tokens):
 
 # ──────────────────────── pseudo-solo synthesis ──────────────────────────────
 
+def _note_intervals(events):
+    """List note events as (onset, offset, pitches) intervals, plus the bar's
+    total length. Rests advance the clock but contribute no sounding pitch."""
+    intervals = []
+    onset = Fraction(0)
+    for kind, pitches, length_tok, _ in events:
+        dur = len_token_to_fraction(length_tok)
+        if kind == 'note':
+            intervals.append((onset, onset + dur, list(pitches)))
+        onset += dur
+    return intervals, onset
+
+
 def merge_violin_into_R(r_tokens, violin_bar_tokens):
-    """Onset-aligned merge: for each piano-R event window, fold in any violin
-    pitches sounding during that window as additional chord notes. Piano's
-    rhythm is the master clock."""
+    """Overlay the violin melody onto the piano right hand on a **union onset
+    grid**, preserving BOTH parts' rhythm.
+
+    The bar is sliced at every note onset/offset coming from either the piano R
+    or the violin. Each slice becomes one event holding whatever pitches sound
+    during it (piano-R pitches + violin pitches, deduplicated); a slice with
+    nothing sounding is a rest.
+
+    Why a union grid (rather than the previous "piano rhythm is the master
+    clock"): the old merge folded every violin pitch overlapping a single
+    piano-R window into one chord, so a whole-bar piano rest (or a long piano
+    note) collapsed an entire bar of melody — e.g. Do-Re-Mi-Fa — into a single
+    chord struck on beat 1. Slicing on the union of onsets keeps each violin
+    note at its own onset and duration. When the piano R is silent, the only
+    boundaries are the violin's own onsets, so the melody is reproduced
+    verbatim.
+
+    Note: a pitch held across a *foreign* onset (e.g. a sustained violin note
+    while the piano R re-strikes underneath) is re-articulated at that boundary
+    rather than tied — one event per slice. This keeps repeated same-pitch notes
+    distinct (a tie would wrongly fuse "Do Do" into one note) at the cost of a
+    minor re-articulation artifact in densely polyphonic bars."""
     p_header, p_events = parse_events(r_tokens)
     _, v_events = parse_events(violin_bar_tokens)
 
-    # Collect violin note intervals (skip rests; they contribute nothing).
-    v_intervals = []
-    v_onset = Fraction(0)
-    for kind, pitches, length_tok, _ in v_events:
-        v_dur = len_token_to_fraction(length_tok)
-        if kind == 'note':
-            v_intervals.append((v_onset, v_onset + v_dur, list(pitches)))
-        v_onset += v_dur
+    p_intervals, p_len = _note_intervals(p_events)
+    v_intervals, v_len = _note_intervals(v_events)
+    bar_len = max(p_len, v_len)
+    if bar_len == 0:
+        return events_to_tokens(p_header, p_events)
+
+    # Boundary points: every onset/offset from either part, clamped to the bar.
+    points = {Fraction(0), bar_len}
+    for s, e, _ in p_intervals + v_intervals:
+        if s < bar_len:
+            points.add(s)
+        if e <= bar_len:
+            points.add(e)
+    points = sorted(points)
 
     merged = []
-    p_onset = Fraction(0)
-    for kind, pitches, length_tok, attrs in p_events:
-        p_dur = len_token_to_fraction(length_tok)
-        win_start, win_end = p_onset, p_onset + p_dur
-        added = []
-        for vs, ve, vps in v_intervals:
-            if vs < win_end and ve > win_start:
-                for vp in vps:
-                    if vp not in added and vp not in pitches:
-                        added.append(vp)
-        if added:
-            new_kind = 'note'
-            new_pitches = (list(pitches) if kind == 'note' else []) + added
+    for t0, t1 in zip(points, points[1:]):
+        if t1 <= t0:
+            continue
+        sounding = []
+        for s, e, ps in p_intervals + v_intervals:
+            if s <= t0 and e >= t1:          # interval active across [t0, t1)
+                for p in ps:
+                    if p not in sounding:
+                        sounding.append(p)
+        length_tok = f'len_{t1 - t0}'
+        if sounding:
+            merged.append(('note', sounding, length_tok, []))
         else:
-            new_kind, new_pitches = kind, list(pitches)
-        merged.append((new_kind, new_pitches, length_tok, attrs))
-        p_onset = win_end
+            merged.append(('rest', [], length_tok, []))
 
     return events_to_tokens(p_header, merged)
 

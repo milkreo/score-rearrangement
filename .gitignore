@@ -6,3 +6,5 @@ Phase06/mxl_duet/
 Phase06/tokens_duet/
 Phase06/pairs_duet.jsonl
 __pycache__/
+output/pseudo/
+data/checkpoints_duet/train.log
